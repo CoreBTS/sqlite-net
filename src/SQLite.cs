@@ -3470,7 +3470,7 @@ namespace SQLite
 				}
 				else if (SQLite3.LibVersionNumber () >= 3009000) {
 					// fallback to JSON
-					var text = SQLite3.ColumnText (stmt, index);
+					var text = SQLite3.ColumnString (stmt, index);
 					return Newtonsoft.Json.JsonConvert.DeserializeObject(text, clrType, Orm.JsonSerializerSettings);
 				}
 				else {
