@@ -2850,6 +2850,15 @@ namespace SQLite
 		public const int DefaultMaxStringLength = 140;
 		public const string ImplicitPkName = "Id";
 		public const string ImplicitIndexSuffix = "Id";
+		public static readonly Newtonsoft.Json.JsonSerializerSettings JsonSerializerSettings = new Newtonsoft.Json.JsonSerializerSettings 
+		{
+			ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver 
+			{
+				IgnoreSerializableAttribute = true,
+				IgnoreSerializableInterface = true,
+				IgnoreShouldSerializeMembers = true
+			},
+		};
 
 		public static Type GetType (object obj)
 		{
@@ -2896,7 +2905,7 @@ namespace SQLite
 				if (len.HasValue)
 					return "varchar(" + len.Value + ")";
 
-				return "varchar";
+				return "text";
 			}
 			else if (clrType == typeof (TimeSpan)) {
 				return storeTimeSpanAsTicks ? "bigint" : "time";
@@ -2919,8 +2928,9 @@ namespace SQLite
 			else if (clrType == typeof (Guid)) {
 				return "varchar(36)";
 			}
-			else {
-				throw new NotSupportedException ("Don't know about " + clrType);
+			else { // fallback to JSON
+				return SQLite3.LibVersionNumber () >= 3009000 ? "json" : "text";
+				//throw new NotSupportedException ("Don't know about " + clrType);
 			}
 		}
 
@@ -3334,6 +3344,10 @@ namespace SQLite
 						else
 							SQLite3.BindInt (stmt, index, enumIntValue);
 					}
+					else if (SQLite3.LibVersionNumber () >= 3009000) {
+						// fallback to JSON
+						SQLite3.BindText (stmt, index, Newtonsoft.Json.JsonConvert.SerializeObject (value, Orm.JsonSerializerSettings), -1, NegativePointer);
+					}
 					else {
 						throw new NotSupportedException ("Cannot store type: " + Orm.GetType (value));
 					}
@@ -3453,6 +3467,11 @@ namespace SQLite
 				else if (clrType == typeof (UriBuilder)) {
 					var text = SQLite3.ColumnString (stmt, index);
 					return new UriBuilder (text);
+				}
+				else if (SQLite3.LibVersionNumber () >= 3009000) {
+					// fallback to JSON
+					var text = SQLite3.ColumnString (stmt, index);
+					return Newtonsoft.Json.JsonConvert.DeserializeObject(text, clrType, Orm.JsonSerializerSettings);
 				}
 				else {
 					throw new NotSupportedException ("Don't know how to read " + clrType);
