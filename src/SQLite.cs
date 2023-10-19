@@ -4832,6 +4832,15 @@ namespace SQLite
 				else if (call.Method.Name == "IsNullOrEmpty" && args.Length == 1) {
 					sqlCall = "(" + args[0].CommandText + " is null or" + args[0].CommandText + " ='' )";
 				}
+				else if (call.Method.Name == "Trim") {
+					sqlCall = "(trim(" + obj.CommandText + "))";
+				}
+				else if (call.Method.Name == "TrimStart") {
+					sqlCall = "(ltrim(" + obj.CommandText + "))";
+				}
+				else if (call.Method.Name == "TrimEnd") {
+					sqlCall = "(rtrim(" + obj.CommandText + "))";
+				}
 				else {
 					sqlCall = call.Method.Name.ToLower () + "(" + string.Join (",", args.Select (a => a.CommandText).ToArray ()) + ")";
 				}
