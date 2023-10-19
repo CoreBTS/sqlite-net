@@ -71,6 +71,7 @@ namespace SQLite
 			where T3 : new()
 			where T4 : new()
 			where T5 : new();
+
 		Task<CreateTablesResult> CreateTablesAsync (CreateFlags createFlags = CreateFlags.None, params Type[] types);
 		Task<IEnumerable<T>> DeferredQueryAsync<T> (string query, params object[] args) where T : new();
 		Task<IEnumerable<object>> DeferredQueryAsync (TableMapping map, string query, params object[] args);
@@ -382,6 +383,20 @@ namespace SQLite
 		}
 
 		/// <summary>
+		/// Executes a "create table if not exists" on the database. It also
+		/// creates any specified indexes on the columns of the table. 
+		/// </summary>
+		/// <param name="map">The table mapping to create the table from.</param>
+		/// <param name="createFlags">Optional flags allowing implicit PK and indexes based on naming conventions.</param>  
+		/// <returns>
+		/// Whether the table was created or migrated.
+		/// </returns>
+		public Task<CreateTableResult> CreateTableAsync (TableMapping map, CreateFlags createFlags = CreateFlags.None)
+		{
+			return WriteAsync (conn => conn.CreateTable (map, createFlags));
+		}
+
+		/// <summary>
 		/// Executes a "create table if not exists" on the database for each type. It also
 		/// creates any specified indexes on the columns of the table. It uses
 		/// a schema automatically generated from the specified type. You can
@@ -463,6 +478,18 @@ namespace SQLite
 		public Task<CreateTablesResult> CreateTablesAsync (CreateFlags createFlags = CreateFlags.None, params Type[] types)
 		{
 			return WriteAsync (conn => conn.CreateTables (createFlags, types));
+		}
+
+		/// <summary>
+		/// Executes a "create table if not exists" on the database for each type. It also
+		/// creates any specified indexes on the columns of the table.
+		/// </summary>
+		/// <returns>
+		/// Whether the table was created or migrated for each type.
+		/// </returns>
+		public Task<CreateTablesResult> CreateTablesAsync (CreateFlags createFlags = CreateFlags.None, params TableMapping[] mappings)
+		{
+			return WriteAsync (conn => conn.CreateTables (createFlags, mappings));
 		}
 
 		/// <summary>

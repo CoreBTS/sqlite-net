@@ -49,12 +49,16 @@ using Sqlite3DatabaseHandle = SQLitePCL.sqlite3;
 using Sqlite3BackupHandle = SQLitePCL.sqlite3_backup;
 using Sqlite3Statement = SQLitePCL.sqlite3_stmt;
 using Sqlite3 = SQLitePCL.raw;
+using System.Data;
+
+
+
+
 #else
 using Sqlite3DatabaseHandle = System.IntPtr;
 using Sqlite3BackupHandle = System.IntPtr;
 using Sqlite3Statement = System.IntPtr;
 #endif
-
 #pragma warning disable 1591 // XML Doc Comments
 
 namespace SQLite
@@ -76,7 +80,7 @@ namespace SQLite
 
 	public class NotNullConstraintViolationException : SQLiteException
 	{
-		public IEnumerable<TableMapping.Column> Columns { get; protected set; }
+		public IEnumerable<ColumnMapping> Columns { get; protected set; }
 
 		protected NotNullConstraintViolationException (SQLite3.Result r, string message)
 			: this (r, message, null, null)
@@ -556,12 +560,12 @@ namespace SQLite
 			lock (_mappings) {
 				if (_mappings.TryGetValue (key, out map)) {
 					if (createFlags != CreateFlags.None && createFlags != map.CreateFlags) {
-						map = new TableMapping (type, createFlags);
+						map = new TableMappingFromAttributes (type, createFlags);
 						_mappings[key] = map;
 					}
 				}
 				else {
-					map = new TableMapping (type, createFlags);
+					map = new TableMappingFromAttributes (type, createFlags);
 					_mappings.Add (key, map);
 				}
 			}
@@ -581,6 +585,23 @@ namespace SQLite
 		public TableMapping GetMapping<T> (CreateFlags createFlags = CreateFlags.None)
 		{
 			return GetMapping (typeof (T), createFlags);
+		}
+
+		/// <summary>
+		/// Adds or replaces a table mapping in the collection. 
+		/// </summary>
+		/// <param name="tableMapping">The table mapping to add or replace.</param>
+		public static void UseMapping (TableMapping tableMapping)
+		{
+			var key = tableMapping.MappedType.FullName;
+			lock (_mappings) {
+				if (_mappings.ContainsKey (key)) {
+					_mappings[key] = tableMapping;
+				}
+				else {
+					_mappings.Add (key, tableMapping);
+				}
+			}
 		}
 
 		private struct IndexedColumn
@@ -645,10 +666,14 @@ namespace SQLite
 		public CreateTableResult CreateTable (Type ty, CreateFlags createFlags = CreateFlags.None)
 		{
 			var map = GetMapping (ty, createFlags);
+			return CreateTableFromMapping (map, createFlags);
+		}
 
+		CreateTableResult CreateTableFromMapping (TableMapping map, CreateFlags createFlags)
+		{
 			// Present a nice error if no columns specified
 			if (map.Columns.Length == 0) {
-				throw new Exception (string.Format ("Cannot create a table without columns (does '{0}' have public properties?)", ty.FullName));
+				throw new Exception (string.Format ("Cannot create a table without columns (does '{0}' have public properties?)", map.MappedType.FullName));
 			}
 
 			// Check if the table exists
@@ -714,6 +739,21 @@ namespace SQLite
 			}
 
 			return result;
+		}
+
+		/// <summary>
+		/// Executes a "create table if not exists" on the database. It also
+		/// creates any specified indexes on the columns of the table. 
+		/// </summary>
+		/// <param name="map">The table mapping to create the table from.</param>
+		/// <param name="createFlags">Optional flags allowing implicit PK and indexes based on naming conventions.</param>
+		/// <returns>
+		/// Whether the table was created or migrated.
+		/// </returns>
+		public CreateTableResult CreateTable (TableMapping map, CreateFlags createFlags = CreateFlags.None)
+		{
+			UseMapping (map);
+			return CreateTableFromMapping (map, createFlags);
 		}
 
 		/// <summary>
@@ -801,6 +841,23 @@ namespace SQLite
 			foreach (Type type in types) {
 				var aResult = CreateTable (type, createFlags);
 				result.Results[type] = aResult;
+			}
+			return result;
+		}
+
+		/// <summary>
+		/// Executes a "create table if not exists" on the database for each type. It also
+		/// creates any specified indexes on the columns of the table.
+		/// </summary>
+		/// <returns>
+		/// Whether the table was created or migrated for each type.
+		/// </returns>
+		public CreateTablesResult CreateTables (CreateFlags createFlags = CreateFlags.None, params TableMapping[] mappings)
+		{
+			var result = new CreateTablesResult ();
+			foreach (var mapping in mappings) {
+				var aResult = CreateTable (mapping, createFlags);
+				result.Results[mapping.MappedType] = aResult;
 			}
 			return result;
 		}
@@ -923,7 +980,7 @@ namespace SQLite
 
 		void MigrateTable (TableMapping map, List<ColumnInfo> existingCols)
 		{
-			var toBeAdded = new List<TableMapping.Column> ();
+			var toBeAdded = new List<ColumnMapping> ();
 
 			foreach (var p in map.Columns) {
 				var found = false;
@@ -2447,8 +2504,15 @@ namespace SQLite
 	{
 	}
 
+	public interface IColumnIndex
+	{
+		string Name { get; set; }
+		int Order { get; set; }
+		bool Unique { get; set; }
+	}
+
 	[AttributeUsage (AttributeTargets.Property)]
-	public class IndexedAttribute : Attribute
+	public class IndexedAttribute : Attribute, IColumnIndex
 	{
 		public string Name { get; set; }
 		public int Order { get; set; }
@@ -2463,6 +2527,13 @@ namespace SQLite
 			Name = name;
 			Order = order;
 		}
+	}
+
+	public class ColumnIndex : IColumnIndex
+	{
+		public string Name { get; set; }
+		public int Order { get; set; }
+		public bool Unique { get; set; }
 	}
 
 	[AttributeUsage (AttributeTargets.Property)]
@@ -2526,27 +2597,201 @@ namespace SQLite
 	{
 		public Type MappedType { get; private set; }
 
-		public string TableName { get; private set; }
+		public string TableName { get; protected set; }
 
-		public bool WithoutRowId { get; private set; }
+		public bool WithoutRowId { get; protected internal set; }
 
-		public Column[] Columns { get; private set; }
+		public ColumnMapping[] Columns { get; protected internal set; }
 
-		public Column PK { get; private set; }
+		public ColumnMapping PK { get; protected internal set; }
 
-		public string GetByPrimaryKeySql { get; private set; }
+		public string GetByPrimaryKeySql { get; protected internal set; }
 
-		public CreateFlags CreateFlags { get; private set; }
+		public CreateFlags CreateFlags { get; protected set; }
 
-		internal MapMethod Method { get; private set; } = MapMethod.ByName;
+		internal MapMethod Method { get; set; } = MapMethod.ByName;
 
-		readonly Column _autoPk;
-		readonly Column[] _insertColumns;
-		readonly Column[] _insertOrReplaceColumns;
+		internal ColumnMapping AutoIncPk { get; set; }
 
-		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
+		public ColumnMapping[] InsertColumns => Columns.Where (c => !c.IsAutoInc).ToArray ();
+		public ColumnMapping[] InsertOrReplaceColumns => Columns.ToArray ();
+
+		public TableMapping (Type type, string tableName = null)
 		{
 			MappedType = type;
+			TableName = tableName ?? type.Name;
+		}
+
+
+		public bool HasAutoIncPK => AutoIncPk != null;
+
+		public void SetAutoIncPK (object obj, long id)
+		{
+			if (AutoIncPk != null) {
+				AutoIncPk.SetValue (obj, Convert.ChangeType (id, AutoIncPk.ColumnType, null));
+			}
+		}
+
+		public ColumnMapping FindColumnWithPropertyName (string propertyName)
+		{
+			var exact = Columns.FirstOrDefault (c => c.PropertyName == propertyName);
+			return exact;
+		}
+
+		public ColumnMapping FindColumn (string columnName)
+		{
+			if(Method != MapMethod.ByName)
+				throw new InvalidOperationException($"This {nameof(TableMapping)} is not mapped by name, but {Method}.");
+
+			var exact = Columns.FirstOrDefault (c => c.Name.ToLower () == columnName.ToLower ());
+			return exact;
+		}
+
+//		public class Column
+//		{
+//			MemberInfo _member;
+
+//			public string Name { get; private set; }
+
+//			public PropertyInfo PropertyInfo => _member as PropertyInfo;
+
+//			public string PropertyName { get { return _member.Name; } }
+
+//			public Type ColumnType { get; private set; }
+
+//			public string Collation { get; private set; }
+
+//			public bool IsAutoInc { get; private set; }
+//			public bool IsAutoGuid { get; private set; }
+
+//			public bool IsPK { get; private set; }
+
+//			public IEnumerable<IndexedAttribute> Indices { get; set; }
+
+//			public bool IsNullable { get; private set; }
+
+//			public int? MaxStringLength { get; private set; }
+
+//			public bool StoreAsText { get; private set; }
+
+//			public Column (MemberInfo member, CreateFlags createFlags = CreateFlags.None)
+//			{
+//				_member = member;
+//				var memberType = GetMemberType(member);
+
+//				var colAttr = member.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
+//#if ENABLE_IL2CPP
+//                var ca = member.GetCustomAttribute(typeof(ColumnAttribute)) as ColumnAttribute;
+//				Name = ca == null ? member.Name : ca.Name;
+//#else
+//				Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
+//						colAttr.ConstructorArguments[0].Value?.ToString () :
+//						member.Name;
+//#endif
+//				//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
+//				ColumnType = Nullable.GetUnderlyingType (memberType) ?? memberType;
+//				Collation = Orm.Collation (member);
+
+//				IsPK = Orm.IsPK (member) ||
+//					(((createFlags & CreateFlags.ImplicitPK) == CreateFlags.ImplicitPK) &&
+//					 	string.Compare (member.Name, Orm.ImplicitPkName, StringComparison.OrdinalIgnoreCase) == 0);
+
+//				var isAuto = Orm.IsAutoInc (member) || (IsPK && ((createFlags & CreateFlags.AutoIncPK) == CreateFlags.AutoIncPK));
+//				IsAutoGuid = isAuto && ColumnType == typeof (Guid);
+//				IsAutoInc = isAuto && !IsAutoGuid;
+
+//				Indices = Orm.GetIndices (member);
+//				if (!Indices.Any ()
+//					&& !IsPK
+//					&& ((createFlags & CreateFlags.ImplicitIndex) == CreateFlags.ImplicitIndex)
+//					&& Name.EndsWith (Orm.ImplicitIndexSuffix, StringComparison.OrdinalIgnoreCase)
+//					) {
+//					Indices = new IndexedAttribute[] { new IndexedAttribute () };
+//				}
+//				IsNullable = !(IsPK || Orm.IsMarkedNotNull (member));
+//				MaxStringLength = Orm.MaxStringLength (member);
+
+//				StoreAsText = memberType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
+//			}
+
+//			public Column (PropertyInfo member, CreateFlags createFlags = CreateFlags.None)
+//				: this((MemberInfo)member, createFlags)
+//			{ }
+
+//			public void SetValue (object obj, object val)
+//			{
+//				if(_member is PropertyInfo propy)
+//				{
+//					if (val != null && ColumnType.GetTypeInfo ().IsEnum)
+//						propy.SetValue (obj, Enum.ToObject (ColumnType, val));
+//					else
+//						propy.SetValue (obj, val);
+//				}
+//				else if(_member is FieldInfo field)
+//				{
+//					if (val != null && ColumnType.GetTypeInfo ().IsEnum)
+//						field.SetValue (obj, Enum.ToObject (ColumnType, val));
+//					else
+//						field.SetValue (obj, val);
+//				}
+//				else
+//					throw new InvalidProgramException("unreachable condition");
+//			}
+
+//			public object GetValue (object obj)
+//			{
+//				if(_member is PropertyInfo propy)
+//					return propy.GetValue(obj);
+//				else if(_member is FieldInfo field)
+//					return field.GetValue(obj);
+//				else
+//					throw new InvalidProgramException("unreachable condition");
+//			}
+
+//			private static Type GetMemberType(MemberInfo m)
+//			{
+//				switch(m.MemberType)
+//				{
+//					case MemberTypes.Property: return ((PropertyInfo)m).PropertyType;
+//					case MemberTypes.Field: return ((FieldInfo)m).FieldType;
+//					default: throw new InvalidProgramException($"{nameof(TableMapping)} supports properties or fields only.");
+//				}
+//			}
+//		}
+
+		internal enum MapMethod
+		{
+			ByName,
+			ByPosition
+		}
+
+		/// <summary>
+		/// Returns a TableMappingBuilder for constructing table mappings with a Fluent API.
+		/// Please note: the SQLite attributes on the type's properties will be ignored (by design) if this method is used.
+		/// </summary>
+		/// <typeparam name="T">The entity type to build a table mapping for.</typeparam>
+		/// <returns>The table mapping builder.</returns>
+		public static TableMappingBuilder<T> Build<T> ()
+		{
+			return new TableMappingBuilder<T> ();
+		}
+
+		/// <summary>
+		/// Returns a TableMapping by retrieving the attributes of the given type using reflection.
+		/// </summary>
+		/// <param name="createFlags">Optional flags allowing implicit PK and indexes based on naming conventions.</param>
+		/// <typeparam name="T">The type to reflect to create the table mapping.</typeparam>
+		/// <returns>The table mapping for the reflected type.</returns>
+		public static TableMapping From<T> (CreateFlags createFlags = CreateFlags.None)
+		{
+			return new TableMappingFromAttributes (typeof (T), createFlags);
+		}
+	}
+
+	class TableMappingFromAttributes : TableMapping
+	{
+		internal TableMappingFromAttributes (Type type, CreateFlags createFlags = CreateFlags.None) : base (type)
+		{
 			CreateFlags = createFlags;
 
 			var typeInfo = type.GetTypeInfo ();
@@ -2563,25 +2808,25 @@ namespace SQLite
 			TableName = (tableAttr != null && !string.IsNullOrEmpty (tableAttr.Name)) ? tableAttr.Name : MappedType.Name;
 			WithoutRowId = tableAttr != null ? tableAttr.WithoutRowId : false;
 
-			var members = GetPublicMembers(type);
-			var cols = new List<Column>(members.Count);
-			foreach(var m in members)
-			{
-				var ignore = m.IsDefined(typeof(IgnoreAttribute), true);
-				if(!ignore)
-					cols.Add(new Column(m, createFlags));
+			var (members, mappingMethod) = GetPublicMembers (type);
+			Method = mappingMethod;
+
+			var cols = new List<ColumnMapping> (members.Count);
+			foreach (var m in members) {
+				var ignore = m.IsDefined (typeof (IgnoreAttribute), true);
+				if (!ignore)
+					cols.Add (new ColumnMappingFromAttributes (m, createFlags));
 			}
 			Columns = cols.ToArray ();
 			foreach (var c in Columns) {
 				if (c.IsAutoInc && c.IsPK) {
-					_autoPk = c;
+					AutoIncPk = c;
 				}
+
 				if (c.IsPK) {
 					PK = c;
 				}
 			}
-
-			HasAutoIncPK = _autoPk != null;
 
 			if (PK != null) {
 				GetByPrimaryKeySql = string.Format ("select * from \"{0}\" where \"{1}\" = ?", TableName, PK.Name);
@@ -2590,208 +2835,585 @@ namespace SQLite
 				// People should not be calling Get/Find without a PK
 				GetByPrimaryKeySql = string.Format ("select * from \"{0}\" limit 1", TableName);
 			}
-
-			_insertColumns = Columns.Where (c => !c.IsAutoInc).ToArray ();
-			_insertOrReplaceColumns = Columns.ToArray ();
 		}
 
-		private IReadOnlyCollection<MemberInfo> GetPublicMembers(Type type)
+		protected internal static (IReadOnlyCollection<MemberInfo>, MapMethod) GetPublicMembers (Type type)
 		{
-			if(type.Name.StartsWith("ValueTuple`"))
-				return GetFieldsFromValueTuple(type);
+			if (type.BaseType == typeof(ValueType))
+				return GetFieldsFromValueTuple (type);
 
-			var members = new List<MemberInfo>();
-			var memberNames = new HashSet<string>();
-			var newMembers = new List<MemberInfo>();
-			do
-			{
-				var ti = type.GetTypeInfo();
-				newMembers.Clear();
+			var members = new List<MemberInfo> ();
+			var memberNames = new HashSet<string> ();
+			var newMembers = new List<MemberInfo> ();
+			do {
+				var ti = type.GetTypeInfo ();
+				newMembers.Clear ();
 
-				newMembers.AddRange(
+				newMembers.AddRange (
 					from p in ti.DeclaredProperties
-					where !memberNames.Contains(p.Name) &&
+					where !memberNames.Contains (p.Name) &&
 						p.CanRead && p.CanWrite &&
 						p.GetMethod != null && p.SetMethod != null &&
 						p.GetMethod.IsPublic && p.SetMethod.IsPublic &&
 						!p.GetMethod.IsStatic && !p.SetMethod.IsStatic
 					select p);
 
-				members.AddRange(newMembers);
-				foreach(var m in newMembers)
-					memberNames.Add(m.Name);
+				members.AddRange (newMembers);
+				foreach (var m in newMembers)
+					memberNames.Add (m.Name);
 
 				type = ti.BaseType;
 			}
-			while(type != typeof(object));
+			while (type != typeof (object));
 
-			return members;
+			return (members, MapMethod.ByName);
 		}
 
-		private IReadOnlyCollection<MemberInfo> GetFieldsFromValueTuple(Type type)
+		protected internal static (IReadOnlyCollection<MemberInfo>, MapMethod) GetFieldsFromValueTuple (Type type)
 		{
-			Method = MapMethod.ByPosition;
-			var fields = type.GetFields();
+			var fields = type.GetFields ();
 
 			// https://docs.microsoft.com/en-us/dotnet/api/system.valuetuple-8.rest
-			if(fields.Length >= 8)
-				throw new NotSupportedException("ValueTuple with more than 7 members not supported due to nesting; see https://docs.microsoft.com/en-us/dotnet/api/system.valuetuple-8.rest");
+			if (fields.Length >= 8)
+				throw new NotSupportedException ("ValueTuple with more than 7 members not supported due to nesting; see https://docs.microsoft.com/en-us/dotnet/api/system.valuetuple-8.rest");
 
-			return fields;
+			return (fields, MapMethod.ByPosition);
+		}
+	}
+
+	public class ColumnMapping
+	{
+		readonly FieldInfo _field;
+		readonly PropertyInfo _prop;
+
+		public string Name { get; internal set; }
+
+		public PropertyInfo PropertyInfo => _prop;
+		public FieldInfo FieldInfo => _field;
+
+		public string PropertyName { get { return _prop?.Name ?? _field?.Name; } }
+
+		public Type ColumnType { get; internal set; }
+
+		public string Collation { get; internal set; }
+
+		public bool IsAutoInc { get; internal set; }
+		public bool IsAutoGuid { get; internal set; }
+
+		public bool IsPK { get; internal set; }
+
+		public IEnumerable<IColumnIndex> Indices { get; set; }
+
+		public bool IsNullable { get; internal set; }
+
+		public int? MaxStringLength { get; internal set; }
+
+		public bool StoreAsText { get; internal set; }
+
+		public ColumnMapping (MemberInfo prop)
+		{
+			_prop = prop as PropertyInfo;
+			_field = prop as FieldInfo;
 		}
 
-		public bool HasAutoIncPK { get; private set; }
-
-		public void SetAutoIncPK (object obj, long id)
+		public void SetValue (object obj, object val)
 		{
-			if (_autoPk != null) {
-				_autoPk.SetValue (obj, Convert.ChangeType (id, _autoPk.ColumnType, null));
+			if (val != null && ColumnType.GetTypeInfo ().IsEnum) {
+				_prop?.SetValue (obj, Enum.ToObject (ColumnType, val));
+				_field?.SetValue (obj, Enum.ToObject (ColumnType, val));
+			}
+			else {
+				_prop?.SetValue (obj, val, null);
+				_field?.SetValue (obj, val);
 			}
 		}
 
-		public Column[] InsertColumns {
-			get {
-				return _insertColumns;
+		public object GetValue (object obj)
+		{
+			return _prop?.GetValue (obj, null) 
+				?? _field?.GetValue(obj);
+		}
+	}
+
+	class ColumnMappingFromAttributes : ColumnMapping
+	{
+		internal ColumnMappingFromAttributes (MemberInfo prop, CreateFlags createFlags = CreateFlags.None) : base (prop)
+		{
+			var colAttr = prop.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
+
+			Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
+				colAttr.ConstructorArguments[0].Value?.ToString () :
+				prop.Name;
+
+			var propertyType = (prop as PropertyInfo)?.PropertyType
+							 ?? (prop as FieldInfo)?.FieldType;
+
+			//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
+			ColumnType = Nullable.GetUnderlyingType (propertyType) ?? propertyType;
+			Collation = Orm.Collation (prop);
+
+			IsPK = Orm.IsPK (prop) ||
+				   (((createFlags & CreateFlags.ImplicitPK) == CreateFlags.ImplicitPK) &&
+					String.Compare (prop.Name, Orm.ImplicitPkName, StringComparison.OrdinalIgnoreCase) == 0);
+
+			var isAuto = Orm.IsAutoInc (prop) || (IsPK && ((createFlags & CreateFlags.AutoIncPK) == CreateFlags.AutoIncPK));
+			IsAutoGuid = isAuto && ColumnType == typeof (Guid);
+			IsAutoInc = isAuto && !IsAutoGuid;
+
+			Indices = Orm.GetIndices (prop);
+			if (!Indices.Any ()
+				&& !IsPK
+				&& ((createFlags & CreateFlags.ImplicitIndex) == CreateFlags.ImplicitIndex)
+				&& Name.EndsWith (Orm.ImplicitIndexSuffix, StringComparison.OrdinalIgnoreCase)
+			) {
+				Indices = new IColumnIndex[] { new IndexedAttribute () };
+			}
+			IsNullable = !(IsPK || Orm.IsMarkedNotNull (prop));
+			MaxStringLength = Orm.MaxStringLength (prop);
+
+			StoreAsText = propertyType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
+		}
+	}
+
+	static class TableMappingBuilderExtensions
+	{
+		internal static MemberInfo AsMemberInfo<TEntity> (this Expression<Func<TEntity, object>> property)
+		{
+			Expression body = property.Body;
+			var operand = (body as UnaryExpression)?.Operand as MemberExpression;
+			if (operand != null) {
+				body = operand;
+			}
+
+			return (body as MemberExpression)?.Member;
+		}
+
+		internal static MemberInfo AsMemberInfo<TEntity, TProperty> (this Expression<Func<TEntity, TProperty>> property)
+		{
+			Expression body = property.Body;
+			var operand = (body as UnaryExpression)?.Operand as MemberExpression;
+			if (operand != null) {
+				body = operand;
+			}
+
+			return (body as MemberExpression)?.Member;
+		}
+
+		internal static void AddPropertyValue<T, TEntity> (this Dictionary<MemberInfo, T> dict, Expression<Func<TEntity, object>> property, T value)
+		{
+			var prop = AsMemberInfo (property);
+			dict[prop] = value;
+		}
+
+		internal static void AddProperty<TEntity> (this List<MemberInfo> list, Expression<Func<TEntity, object>> property)
+		{
+			var prop = AsMemberInfo (property);
+			if (!list.Contains (prop)) {
+				list.Add (prop);
 			}
 		}
 
-		public Column[] InsertOrReplaceColumns {
-			get {
-				return _insertOrReplaceColumns;
+		internal static void AddProperties<TEntity> (this List<MemberInfo> list, Expression<Func<TEntity, object>>[] properties)
+		{
+			foreach (var property in properties) {
+				AddProperty (list, property);
 			}
 		}
 
-		public Column FindColumnWithPropertyName (string propertyName)
+		internal static T GetOrDefault<T> (this Dictionary<MemberInfo, T> dict, MemberInfo key, T defaultValue = default (T))
 		{
-			var exact = Columns.FirstOrDefault (c => c.PropertyName == propertyName);
-			return exact;
+			if (dict.ContainsKey (key)) {
+				return dict[key];
+			}
+
+			return defaultValue;
+		}
+	}
+
+	public class TableMappingBuilder<T>
+	{
+		readonly List<ColumnMappingBuilder> _columns = new List<ColumnMappingBuilder> ();
+
+		public abstract class ColumnMappingBuilder {
+			public abstract bool Matches (MemberInfo info);
+			public abstract ColumnMapping ToMapping ();
+
+			public string Collation { get; protected set; }
+			public string ColumnName { get; protected set; }
+			public bool IsAutoIncrement { get; protected set; }
+			public bool IsIgnored { get; protected set; }
+			public bool IsNotNull { get; protected set; }
+			public bool IsStoredAsText { get; protected set; }
+			public int? MaxLength { get; protected set; }
 		}
 
-		public Column FindColumn (string columnName)
+		public class ColumnMappingBuilder<TCol> : ColumnMappingBuilder
 		{
-			if(Method != MapMethod.ByName)
-				throw new InvalidOperationException($"This {nameof(TableMapping)} is not mapped by name, but {Method}.");
+			static Type ColumnType => typeof(TCol);
 
-			var exact = Columns.FirstOrDefault (c => c.Name.ToLower () == columnName.ToLower ());
-			return exact;
-		}
+			private MemberInfo _info;
+			private TableMappingBuilder<T> _table;
 
-		public class Column
-		{
-			MemberInfo _member;
-
-			public string Name { get; private set; }
-
-			public PropertyInfo PropertyInfo => _member as PropertyInfo;
-
-			public string PropertyName { get { return _member.Name; } }
-
-			public Type ColumnType { get; private set; }
-
-			public string Collation { get; private set; }
-
-			public bool IsAutoInc { get; private set; }
-			public bool IsAutoGuid { get; private set; }
-
-			public bool IsPK { get; private set; }
-
-			public IEnumerable<IndexedAttribute> Indices { get; set; }
-
-			public bool IsNullable { get; private set; }
-
-			public int? MaxStringLength { get; private set; }
-
-			public bool StoreAsText { get; private set; }
-
-			public Column (MemberInfo member, CreateFlags createFlags = CreateFlags.None)
+			public ColumnMappingBuilder (TableMappingBuilder<T> table, Expression<Func<T, TCol>> property)
 			{
-				_member = member;
-				var memberType = GetMemberType(member);
+				_info = property.AsMemberInfo ();
+				ColumnName = _info.Name;
 
-				var colAttr = member.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
-#if ENABLE_IL2CPP
-                var ca = member.GetCustomAttribute(typeof(ColumnAttribute)) as ColumnAttribute;
-				Name = ca == null ? member.Name : ca.Name;
-#else
-				Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
-						colAttr.ConstructorArguments[0].Value?.ToString () :
-						member.Name;
-#endif
-				//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
-				ColumnType = Nullable.GetUnderlyingType (memberType) ?? memberType;
-				Collation = Orm.Collation (member);
-
-				IsPK = Orm.IsPK (member) ||
-					(((createFlags & CreateFlags.ImplicitPK) == CreateFlags.ImplicitPK) &&
-					 	string.Compare (member.Name, Orm.ImplicitPkName, StringComparison.OrdinalIgnoreCase) == 0);
-
-				var isAuto = Orm.IsAutoInc (member) || (IsPK && ((createFlags & CreateFlags.AutoIncPK) == CreateFlags.AutoIncPK));
-				IsAutoGuid = isAuto && ColumnType == typeof (Guid);
-				IsAutoInc = isAuto && !IsAutoGuid;
-
-				Indices = Orm.GetIndices (member);
-				if (!Indices.Any ()
-					&& !IsPK
-					&& ((createFlags & CreateFlags.ImplicitIndex) == CreateFlags.ImplicitIndex)
-					&& Name.EndsWith (Orm.ImplicitIndexSuffix, StringComparison.OrdinalIgnoreCase)
-					) {
-					Indices = new IndexedAttribute[] { new IndexedAttribute () };
-				}
-				IsNullable = !(IsPK || Orm.IsMarkedNotNull (member));
-				MaxStringLength = Orm.MaxStringLength (member);
-
-				StoreAsText = memberType.GetTypeInfo ().CustomAttributes.Any (x => x.AttributeType == typeof (StoreAsTextAttribute));
+				_table = table;
+				table._columns.Add (this);
 			}
 
-			public Column (PropertyInfo member, CreateFlags createFlags = CreateFlags.None)
-				: this((MemberInfo)member, createFlags)
-			{ }
-
-			public void SetValue (object obj, object val)
+			public override bool Matches (MemberInfo info)
 			{
-				if(_member is PropertyInfo propy)
-				{
-					if (val != null && ColumnType.GetTypeInfo ().IsEnum)
-						propy.SetValue (obj, Enum.ToObject (ColumnType, val));
-					else
-						propy.SetValue (obj, val);
-				}
-				else if(_member is FieldInfo field)
-				{
-					if (val != null && ColumnType.GetTypeInfo ().IsEnum)
-						field.SetValue (obj, Enum.ToObject (ColumnType, val));
-					else
-						field.SetValue (obj, val);
-				}
-				else
-					throw new InvalidProgramException("unreachable condition");
+				return _info == info;
 			}
 
-			public object GetValue (object obj)
+			public override ColumnMapping ToMapping ()
 			{
-				if(_member is PropertyInfo propy)
-					return propy.GetValue(obj);
-				else if(_member is FieldInfo field)
-					return field.GetValue(obj);
-				else
-					throw new InvalidProgramException("unreachable condition");
+				if (IsIgnored) { return null; }
+
+				var isPrimaryKey = _table._primaryKeys.Any (x => string.Equals (x, _info.Name, StringComparison.InvariantCulture));
+
+				return new ColumnMapping (_info) {
+					Name = ColumnName,
+					//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
+					ColumnType = Nullable.GetUnderlyingType (ColumnType) ?? ColumnType,
+					Collation = Collation ?? string.Empty,
+					IsPK = isPrimaryKey,
+					Indices = _table._indices.GetOrDefault (_info, new List<ColumnIndex> ()),
+					IsAutoGuid = IsAutoIncrement && ColumnType == typeof (Guid),
+					IsAutoInc = IsAutoIncrement,
+					IsNullable = !(isPrimaryKey || IsNotNull),
+					MaxStringLength = MaxLength,
+					StoreAsText = IsStoredAsText
+				};
 			}
 
-			private static Type GetMemberType(MemberInfo m)
+			public ColumnMappingBuilder<TCol> HasColumnName (string name)
 			{
-				switch(m.MemberType)
-				{
-					case MemberTypes.Property: return ((PropertyInfo)m).PropertyType;
-					case MemberTypes.Field: return ((FieldInfo)m).FieldType;
-					default: throw new InvalidProgramException($"{nameof(TableMapping)} supports properties or fields only.");
-				}
+				ColumnName = name;
+				return this;
+			}
+
+			public ColumnMappingBuilder<TCol> HasMaxLength(int maxLength)
+			{
+				if (!ColumnType.IsAssignableFrom (typeof (string)))
+					throw new InvalidOperationException ("Cannot specify max length for non-string types");
+
+				MaxLength = maxLength;
+				return this;
+			}
+
+			public ColumnMappingBuilder<TCol> HasCollation(string collation)
+			{
+				if (!ColumnType.IsAssignableFrom (typeof (string)))
+					throw new InvalidOperationException ("Cannot specify collation for non-string types");
+
+				Collation = collation;
+				return this;
+			}
+
+			public ColumnMappingBuilder<TCol> AutoIncrement ()
+			{
+				IsAutoIncrement = true;
+				return this;
+			}
+
+			public ColumnMappingBuilder<TCol> NotNull ()
+			{
+				IsNotNull = true;
+				return this;
+			}
+
+			public ColumnMappingBuilder<TCol> StoreAsText ()
+			{
+				if (!ColumnType.IsEnum)
+					throw new InvalidOperationException ("Only enum fields can be stored as text");
+
+				IsStoredAsText = true;
+				return this;
+			}
+
+			public void Ignore()
+			{
+				IsIgnored = true;
 			}
 		}
 
-		internal enum MapMethod
+		string _tableName;
+
+		readonly List<string> _primaryKeys = new List<string> ();
+		bool _withoutRowId;
+		TableMapping.MapMethod? _method;
+
+		readonly List<string> _ignore = new List<string> ();
+		readonly List<string> _autoInc = new List<string> ();
+		//readonly List<string> _notNull = new List<string> ();
+		//readonly List<string> _storeAsText = new List<string> ();
+
+		//readonly Dictionary<MemberInfo, string> _columnNames = new Dictionary<MemberInfo, string> ();
+		//readonly Dictionary<MemberInfo, int?> _maxLengths = new Dictionary<MemberInfo, int?> ();
+		//readonly Dictionary<MemberInfo, string> _collations = new Dictionary<MemberInfo, string> ();
+		readonly Dictionary<MemberInfo, List<ColumnIndex>> _indices = new Dictionary<MemberInfo, List<ColumnIndex>> ();
+
+		static Type MappedType => typeof (T);
+
+		public TableMappingBuilder ()
 		{
-			ByName,
-			ByPosition
+			_tableName = MappedType.Name;
+		}
+
+		public TableMappingBuilder<T> MapColumnsByPosition()
+		{
+			_method = TableMapping.MapMethod.ByPosition;
+			return this;
+		}
+
+		public TableMappingBuilder<T> MapColumnsByName()
+		{
+			_method = TableMapping.MapMethod.ByName;
+			return this;
+		}
+
+		public TableMappingBuilder<T> HasTableName (string name)
+		{
+			_tableName = name;
+			return this;
+		}
+
+		public TableMappingBuilder<T> WithoutRowId (bool value = true)
+		{
+			_withoutRowId = value;
+			return this;
+		}
+
+		public TableMappingBuilder<T> WithColumns(Action<TableMappingBuilder<T>> configure)
+		{
+			configure (this);
+			return this;
+		}
+
+		public ColumnMappingBuilder<TCol> Column<TCol>(Expression<Func<T, TCol>> property)
+		{
+			return new ColumnMappingBuilder<TCol> (this, property);
+		}
+
+		/*public TableMappingBuilder<T> ColumnName (Expression<Func<T, object>> property, string name)
+		{
+			_columnNames.AddPropertyValue (property, name);
+			return this;
+		}
+
+		public TableMappingBuilder<T> MaxLength (Expression<Func<T, object>> property, int maxLength)
+		{
+			_maxLengths.AddPropertyValue (property, maxLength);
+			return this;
+		}
+
+		public TableMappingBuilder<T> Collation (Expression<Func<T, object>> property, string collation)
+		{
+			_collations.AddPropertyValue (property, collation);
+			return this;
+		}
+		*/
+
+		public TableMappingBuilder<T> HasIndex (Expression<Func<T, object>> property, bool unique = false, string indexName = null, int order = 0)
+		{
+			var prop = property.AsMemberInfo ();
+			if (!_indices.ContainsKey (prop)) {
+				_indices[prop] = new List<ColumnIndex> ();
+			}
+
+			_indices[prop].Add (new ColumnIndex {
+				Name = indexName,
+				Order = order,
+				Unique = unique
+			});
+
+			return this;
+		}
+
+		public TableMappingBuilder<T> HasIndex (string indexName, Expression<Func<T, object>> property, bool unique = false, int order = 0)
+		{
+			return HasIndex (property, unique, indexName, order);
+		}
+
+		/*public TableMappingBuilder<T> HasUniqueIndex (Expression<Func<T, object>> property, string indexName = null, int order = 0)
+		{
+			return Index (property, true, indexName, order);
+		}
+
+		public TableMappingBuilder<T> HasUniqueIndex (string indexName, Expression<Func<T, object>> property, int order = 0)
+		{
+			return Index (property, true, indexName, order);
+		}*/
+
+		public TableMappingBuilder<T> HasIndex (params Expression<Func<T, object>>[] properties)
+		{
+			for (int i = 0; i < properties.Length; i++) {
+				HasIndex (properties[i], false, null, i);
+			}
+
+			return this;
+		}
+
+		public TableMappingBuilder<T> HasIndex (string indexName, params Expression<Func<T, object>>[] properties)
+		{
+			for (int i = 0; i < properties.Length; i++) {
+				HasIndex (properties[i], false, indexName, i);
+			}
+
+			return this;
+		}
+
+		/*public TableMappingBuilder<T> Unique (params Expression<Func<T, object>>[] properties)
+		{
+			for (int i = 0; i < properties.Length; i++) {
+				Index (properties[i], true, null, i);
+			}
+
+			return this;
+		}
+
+		public TableMappingBuilder<T> Unique (string indexName, params Expression<Func<T, object>>[] properties)
+		{
+			for (int i = 0; i < properties.Length; i++) {
+				Index (properties[i], true, indexName, i);
+			}
+
+			return this;
+		}*/
+
+		public TableMappingBuilder<T> HasPrimaryKey (Expression<Func<T, object>> property, bool autoIncrement = false)
+		{
+			var propInfo = property.AsMemberInfo ();
+
+			_primaryKeys.Add (propInfo.Name);
+			if (autoIncrement) {
+				_autoInc.Add (propInfo.Name);
+			}
+
+			return this;
+		}
+
+		public TableMappingBuilder<T> Ignore (Expression<Func<T, object>> property)
+		{
+			_ignore.Add (property.AsMemberInfo ().Name);
+			return this;
+		}
+
+		public TableMappingBuilder<T> Ignore (params Expression<Func<T, object>>[] properties)
+		{
+			_ignore.AddRange (properties.Select (p => p.AsMemberInfo ().Name));
+			return this;
+		}
+
+		public TableMappingBuilder<T> Ignore (params string[] properties)
+		{
+			_ignore.AddRange (properties);
+			return this;
+		}
+
+		/*public TableMappingBuilder<T> AutoIncrement (Expression<Func<T, object>> property)
+		{
+			_autoInc.Add (property.AsPropertyInfo ().Name);
+			return this;
+		}
+
+		public TableMappingBuilder<T> AutoIncrement (params Expression<Func<T, object>>[] properties)
+		{
+			_autoInc.AddRange (properties.Select (p => p.AsPropertyInfo ().Name));
+			return this;
+		}*/
+
+		/*public TableMappingBuilder<T> NotNull (Expression<Func<T, object>> property)
+		{
+			_notNull.Add (property.AsPropertyInfo ().Name);
+			return this;
+		}*/
+
+		/*public TableMappingBuilder<T> NotNull (params Expression<Func<T, object>>[] properties)
+		{
+			_notNull.AddRange (properties.Select (p => p.AsPropertyInfo ().Name));
+			return this;
+		}*/
+
+		/*public TableMappingBuilder<T> StoreAsText (Expression<Func<T, object>> property)
+		{
+			_storeAsText.Add (property.AsPropertyInfo ().Name);
+			return this;
+		}*/
+
+		/*public TableMappingBuilder<T> StoreAsText (params Expression<Func<T, object>>[] properties)
+		{
+			_storeAsText.AddRange (properties.Select (p => p.AsPropertyInfo ().Name));
+			return this;
+		}*/
+
+		/// <summary>
+		/// Creates a table mapping based on the expressions provided to the builder.
+		/// </summary>
+		/// <returns>The table mapping as created by the builder.</returns>
+		public TableMapping ToMapping ()
+		{
+			var tableMapping = new TableMapping (MappedType, _tableName ?? MappedType.Name) {
+				WithoutRowId = _withoutRowId
+			};
+
+			var (props, mappingMethod) = TableMappingFromAttributes.GetPublicMembers(MappedType);
+			tableMapping.Method = _method ?? mappingMethod;
+
+			var cols = new List<ColumnMapping> ();
+
+			foreach (var p in props) {
+				// Find 
+				if ((p is FieldInfo || (p as PropertyInfo)?.CanWrite == true) && !_ignore.Contains (p.Name)) {
+					var colMapping = _columns.FirstOrDefault (x => x.Matches (p));
+					if (colMapping?.IsIgnored == true) { continue; }
+
+					var col = colMapping?.ToMapping() 
+							?? new ColumnMapping (p) {
+									Name =p.Name,
+									//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
+									ColumnType = Nullable.GetUnderlyingType ((p as PropertyInfo)?.PropertyType ?? (p as FieldInfo)?.FieldType) 
+												 ?? (p as PropertyInfo)?.PropertyType ?? (p as FieldInfo)?.FieldType,
+									Collation = string.Empty,
+									IsPK = _primaryKeys.Any(x => string.Equals(x, p.Name, StringComparison.InvariantCulture))
+								};
+
+					bool isAuto = colMapping?.IsAutoIncrement ?? _autoInc.Contains (p.Name, StringComparer.InvariantCulture);
+					col.IsAutoGuid = isAuto && col.ColumnType == typeof (Guid);
+					col.IsAutoInc = isAuto && !col.IsAutoGuid;
+
+					col.Indices = _indices.GetOrDefault (p, new List<ColumnIndex> (0));
+
+					col.IsNullable = !col.IsPK;
+
+					cols.Add (col);
+				}
+			}
+
+			tableMapping.Columns = cols.ToArray ();
+
+			foreach (var c in tableMapping.Columns) {
+				if (c.IsAutoInc && c.IsPK) {
+					tableMapping.AutoIncPk = c;
+				}
+
+				if (c.IsPK) {
+					tableMapping.PK = c;
+				}
+			}
+
+			if (tableMapping.PK != null) {
+				tableMapping.GetByPrimaryKeySql = $"select * from \"{tableMapping.TableName}\" where \"{tableMapping.PK.Name}\" = ?";
+			}
+			else {
+				// People should not be calling Get/Find without a PK
+				tableMapping.GetByPrimaryKeySql = $"select * from \"{tableMapping.TableName}\" limit 1";
+			}
+
+			return tableMapping;
 		}
 	}
 
@@ -2870,7 +3492,7 @@ namespace SQLite
 			return obj.GetType ();
 		}
 
-		public static string SqlDecl (TableMapping.Column p, bool storeDateTimeAsTicks, bool storeTimeSpanAsTicks)
+		public static string SqlDecl (ColumnMapping p, bool storeDateTimeAsTicks, bool storeTimeSpanAsTicks)
 		{
 			string decl = "\"" + p.Name + "\" " + SqlType (p, storeDateTimeAsTicks, storeTimeSpanAsTicks) + " ";
 
@@ -2890,7 +3512,7 @@ namespace SQLite
 			return decl;
 		}
 
-		public static string SqlType (TableMapping.Column p, bool storeDateTimeAsTicks, bool storeTimeSpanAsTicks)
+		public static string SqlType (ColumnMapping p, bool storeDateTimeAsTicks, bool storeTimeSpanAsTicks)
 		{
 			var clrType = p.ColumnType;
 			if (clrType == typeof (Boolean) || clrType == typeof (Byte) || clrType == typeof (UInt16) || clrType == typeof (SByte) || clrType == typeof (Int16) || clrType == typeof (Int32) || clrType == typeof (UInt32) || clrType == typeof (Int64)) {
@@ -3111,7 +3733,7 @@ namespace SQLite
 
 			var stmt = Prepare ();
 			try {
-				var cols = new TableMapping.Column[SQLite3.ColumnCount (stmt)];
+				var cols = new ColumnMapping[SQLite3.ColumnCount (stmt)];
 				var fastColumnSetters = new Action<object, Sqlite3Statement, int>[SQLite3.ColumnCount (stmt)];
 
 				if (map.Method == TableMapping.MapMethod.ByPosition)
@@ -3496,7 +4118,7 @@ namespace SQLite
 		///
 		/// If no fast setter is available for the requested column (enums in particular cause headache), then this function returns null.
 		/// </returns>
-		internal static Action<object, Sqlite3Statement, int> GetFastSetter<T> (SQLiteConnection conn, TableMapping.Column column)
+		internal static Action<object, Sqlite3Statement, int> GetFastSetter<T> (SQLiteConnection conn, ColumnMapping column)
 		{
 			Action<object, Sqlite3Statement, int> fastSetter = null;
 
@@ -3655,7 +4277,7 @@ namespace SQLite
 		/// <param name="column">The column mapping that identifies the target member of the destination object</param>
 		/// <param name="getColumnValue">A lambda that can be used to retrieve the column value at query-time</param>
 		/// <returns>A strongly-typed delegate</returns>
-		private static Action<object, Sqlite3Statement, int> CreateNullableTypedSetterDelegate<ObjectType, ColumnMemberType> (TableMapping.Column column, Func<Sqlite3Statement, int, ColumnMemberType> getColumnValue) where ColumnMemberType : struct
+		private static Action<object, Sqlite3Statement, int> CreateNullableTypedSetterDelegate<ObjectType, ColumnMemberType> (ColumnMapping column, Func<Sqlite3Statement, int, ColumnMemberType> getColumnValue) where ColumnMemberType : struct
 		{
 			var clrTypeInfo = column.PropertyInfo.PropertyType.GetTypeInfo();
 			bool isNullable = false;
@@ -3687,7 +4309,7 @@ namespace SQLite
 		/// <param name="column">The column mapping that identifies the target member of the destination object</param>
 		/// <param name="getColumnValue">A lambda that can be used to retrieve the column value at query-time</param>
 		/// <returns>A strongly-typed delegate</returns>
-		private static Action<object, Sqlite3Statement, int> CreateTypedSetterDelegate<ObjectType, ColumnMemberType> (TableMapping.Column column, Func<Sqlite3Statement, int, ColumnMemberType> getColumnValue)
+		private static Action<object, Sqlite3Statement, int> CreateTypedSetterDelegate<ObjectType, ColumnMemberType> (ColumnMapping column, Func<Sqlite3Statement, int, ColumnMemberType> getColumnValue)
 		{
 			var setProperty = (Action<ObjectType, ColumnMemberType>)Delegate.CreateDelegate (
 					typeof (Action<ObjectType, ColumnMemberType>), null,
@@ -4209,6 +4831,15 @@ namespace SQLite
 				}
 				else if (call.Method.Name == "IsNullOrEmpty" && args.Length == 1) {
 					sqlCall = "(" + args[0].CommandText + " is null or" + args[0].CommandText + " ='' )";
+				}
+				else if (call.Method.Name == "Trim") {
+					sqlCall = "(trim(" + obj.CommandText + "))";
+				}
+				else if (call.Method.Name == "TrimStart") {
+					sqlCall = "(ltrim(" + obj.CommandText + "))";
+				}
+				else if (call.Method.Name == "TrimEnd") {
+					sqlCall = "(rtrim(" + obj.CommandText + "))";
 				}
 				else {
 					sqlCall = call.Method.Name.ToLower () + "(" + string.Join (",", args.Select (a => a.CommandText).ToArray ()) + ")";

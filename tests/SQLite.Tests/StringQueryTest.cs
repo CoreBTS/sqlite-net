@@ -30,6 +30,10 @@ namespace SQLite.Tests
 				new Product { Name = "Foobar" },
 				new Product { Name = null, Price=100 },
 				new Product { Name = string.Empty,Price=1000 },
+				new Product { Name = "QQQ" },
+				new Product { Name = " QQQ " },
+				new Product { Name = "QQQ " },
+				new Product { Name = " QQQ" },
 			};
 
 			db.InsertAll (prods);
@@ -115,8 +119,29 @@ namespace SQLite.Tests
 			Assert.AreEqual (2, isnullorempty.Count);
 
 			var isnotnullorempty = db.Table<Product>().Where(x => !string.IsNullOrEmpty(x.Name)).ToList();
-			Assert.AreEqual(3, isnotnullorempty.Count);
+			Assert.AreEqual(7, isnotnullorempty.Count);
 
+		}
+
+		[Test]
+		public void Trim()
+		{
+			var trimmed = db.Table<Product> ().Where (x => x.Name.Trim () == "QQQ").ToList ();
+			Assert.AreEqual (4, trimmed.Count);
+		}
+
+		[Test]
+		public void TrimStart ()
+		{
+			var trimmed = db.Table<Product> ().Where (x => x.Name.TrimStart () == "QQQ").ToList ();
+			Assert.AreEqual (2, trimmed.Count);
+		}
+
+		[Test]
+		public void TrimEnd ()
+		{
+			var trimmed = db.Table<Product> ().Where (x => x.Name.TrimEnd () == "QQQ").ToList ();
+			Assert.AreEqual (2, trimmed.Count);
 		}
 	}
 }
