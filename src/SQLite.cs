@@ -3308,6 +3308,12 @@ namespace SQLite
 			return this;
 		}
 
+		public TableMappingBuilder<T> Ignore (params string[] properties)
+		{
+			_ignore.AddRange (properties);
+			return this;
+		}
+
 		/*public TableMappingBuilder<T> AutoIncrement (Expression<Func<T, object>> property)
 		{
 			_autoInc.Add (property.AsPropertyInfo ().Name);
