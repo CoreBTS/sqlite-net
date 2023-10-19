@@ -145,7 +145,7 @@ namespace SQLite.Tests
 		[Test]
 		public void TableMapping_MapsValueTypes()
 		{
-			var mapping = new TableMapping(typeof( (int a, string b, double? c) ));
+			var mapping = new TableMappingFromAttributes(typeof( (int a, string b, double? c) ));
 
 			Assert.AreEqual(3, mapping.Columns.Length);
 			Assert.AreEqual("Item1", mapping.Columns[0].Name);

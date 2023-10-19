@@ -27,7 +27,7 @@ namespace SQLite.Tests
 			db.Insert(b);
 
 			var test = db.CreateCommand("select * from Product")
-				.ExecuteDeferredQuery<Product>(new TableMapping(typeof(Product))).ToList();
+				.ExecuteDeferredQuery<Product>(new TableMappingFromAttributes(typeof(Product))).ToList();
 
 
 			Assert.AreEqual (test.Count, 1);
@@ -44,7 +44,7 @@ namespace SQLite.Tests
 			db.Insert(b);
 
 			var test = db.CreateCommand("select * from Product")
-				.ExecuteDeferredQuery<object>(new TableMapping(typeof(Product))).ToList();
+				.ExecuteDeferredQuery<object>(new TableMappingFromAttributes(typeof(Product))).ToList();
 
 
 			Assert.AreEqual (test.Count, 1);
